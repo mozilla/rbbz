@@ -42,56 +42,80 @@ def bugzilla_to_publish_errors(func):
 
 @bugzilla_to_publish_errors
 def publish_review_request(user, review_request_draft, **kwargs):
-    # Don't publish anything for child requests.
-    # FIXME: There should be a better way to determine if this is a
-    # child review request of a pushed review request, since the following
-    # means that a review request created outside of the push framework
-    # normally won't be mirrored to Bugzilla.
-    if not review_request_draft.depends_on.count():
+    review_request = review_request_draft.get_review_request()
+
+    # skip review requests that were not pushed
+    if str(review_request.extra_data.get('p2rb', False)) == "False":
         return
 
-    bugs = review_request_draft.get_bug_list()
-
-    if len(bugs) == 0 or len(bugs) > 1:
-        raise InvalidBugsError
+    # The reviewid passed through p2rb is, for Mozilla's instance anyway, also
+    # the bug ID.
+    bug_id = review_request_draft.extra_data.get('p2rb.identifier', None)
 
     try:
-        bug_id = int(bugs[0])
+        bug_id = int(bug_id)
     except (TypeError, ValueError):
-        raise InvalidBugIdError(bugs[0])
+        raise InvalidBugIdError(bug_id)
 
     b = Bugzilla(user.bzlogin, user.bzcookie)
 
-    if b.is_bug_confidential(bug_id):
-        raise ConfidentialBugError
+    try:
+        if b.is_bug_confidential(bug_id):
+            raise ConfidentialBugError
+    except xmlrpclib.Fault as e:
+        # 100: Invalid Bug Alias
+        # 101: Bug does not exist
+        if e.faultCode == 100 or e.faultCode == 101:
+            raise InvalidBugIdError(bug_id)
+        raise
+
+    # At this point, we know that the bug ID that we've got
+    # is valid and accessible.
+    review_request_draft.bugs_closed = str(bug_id)
 
     reviewers = [x.get_username() for x in
                  review_request_draft.target_people.all()]
 
-    b.post_rb_url(bug_id,
-                  review_request_draft.get_review_request().id,
-                  review_request_draft.summary,
-                  review_request_draft.description,
-                  review_request_url(review_request_draft.get_review_request()),
-                  reviewers)
+    # Don't make attachments for child review requests, otherwise,
+    # Bugzilla gets inundatated with lots of patches, and the squashed
+    # one is the only one we want to post there.
+    if str(review_request.extra_data.get('p2rb.is_squashed', False)) == "True":
+        b.post_rb_url(bug_id,
+                      review_request.id,
+                      review_request_draft.summary,
+                      review_request_draft.description,
+                      review_request_url(review_request),
+                      reviewers)
 
 
 def publish_review(user, review, **kwargs):
-    bug_id = int(review.review_request.get_bug_list()[0])
+    review_request = review.review_request
+
+    # skip review requests that were not pushed
+    if str(review_request.extra_data.get('p2rb', False)) == "False":
+        return
+
+    bug_id = int(review_request.get_bug_list()[0])
     site = Site.objects.get_current()
     siteconfig = SiteConfiguration.objects.get_current()
     b = Bugzilla(user.bzlogin, user.bzcookie)
 
     b.post_comment(bug_id, build_plaintext_review(review, {"user": user}))
 
-    if review.ship_it and not review.review_request.depends_on.count():
+    if review.ship_it and not review_request.depends_on.count():
         b.r_plus_attachment(bug_id, review.user.username,
-                            review_request_url(review.review_request, site,
+                            review_request_url(review_request, site,
                                                siteconfig))
 
 
 def publish_reply(user, reply, **kwargs):
-    bug_id = int(reply.review_request.get_bug_list()[0])
+    review_request = reply.review_request
+
+    # skip review requests that were not pushed
+    if str(review_request.extra_data.get('p2rb', False)) == "False":
+        return
+
+    bug_id = int(review_request.get_bug_list()[0])
     b = Bugzilla(user.bzlogin, user.bzcookie)
 
     b.post_comment(bug_id, build_plaintext_review(reply, {"user": user}))
@@ -150,3 +174,36 @@ def get_or_create_bugzilla_users(user_data):
 
         users.append(user)
     return users
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#
